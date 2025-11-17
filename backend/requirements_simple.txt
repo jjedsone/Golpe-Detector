@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+psycopg2-binary
+redis
+rq
+playwright
+tldextract
+python-dotenv
+
