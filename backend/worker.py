@@ -30,6 +30,9 @@ except ImportError:
 # Local imports
 from db_pool import get_db_conn, return_db_conn
 from metrics import track_worker_job
+from quarantine import analyze_url_for_attacks, should_quarantine
+from quarantine_api import add_to_quarantine, check_blacklist, add_to_blacklist
+import json
 
 # Configurar logging
 logging.basicConfig(
@@ -261,6 +264,31 @@ def analyze_url(url, user_id, job_id):
                     page.goto(str(url), timeout=30000, wait_until="domcontentloaded")
                     content = page.content()
                     title = page.title()
+                    
+                    # Análise de ataques no conteúdo
+                    attack_analysis = analyze_url_for_attacks(str(url), content)
+                    if attack_analysis.get('is_malicious', False):
+                        result['checks'].append({
+                            "name": "attack_detected",
+                            "ok": False,
+                            "reason": f"Ataques detectados: {', '.join(set([t.get('type', 'unknown') for t in attack_analysis.get('threats', [])[:5]]))}",
+                            "details": {
+                                "threats": attack_analysis.get('threats', [])[:10],
+                                "risk_level": attack_analysis.get('risk_level')
+                            }
+                        })
+                        result['score'] += 100  # Score máximo para ataques
+                        
+                        # Adicionar à quarentena se necessário
+                        if should_quarantine(attack_analysis):
+                            try:
+                                add_to_quarantine('url', str(url), attack_analysis,
+                                                attack_analysis.get('risk_level', 'critical'),
+                                                notes="Ataque detectado durante análise")
+                                # Adicionar à blacklist
+                                add_to_blacklist('url', str(url), threat_type='attack_detected')
+                            except Exception as e:
+                                logger.warning("Erro ao adicionar à quarentena: %s", e)
                     
                     # Detectar formulários suspeitos
                     forms = page.query_selector_all("form")

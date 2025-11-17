@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verificador de Links - Golpe Detector</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 16px;
+        }
+
+        .input-group {
+            margin-bottom: 30px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            padding: 15px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .result {
+            margin-top: 30px;
+            padding: 25px;
+            border-radius: 15px;
+            animation: fadeIn 0.5s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result.trusted {
+            background: #d4edda;
+            border: 2px solid #28a745;
+        }
+
+        .result.moderate {
+            background: #fff3cd;
+            border: 2px solid #ffc107;
+        }
+
+        .result.suspicious {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .trust-icon {
+            font-size: 48px;
+        }
+
+        .trust-score {
+            font-size: 36px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .trust-level {
+            font-size: 24px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #333;
+        }
+
+        .result-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .result-section h3 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+
+        .issues-list, .info-list {
+            list-style: none;
+            padding: 0;
+        }
+
+        .issues-list li, .info-list li {
+            padding: 8px 0;
+            padding-left: 25px;
+            position: relative;
+        }
+
+        .issues-list li:before {
+            content: "⚠️";
+            position: absolute;
+            left: 0;
+        }
+
+        .info-list li:before {
+            content: "ℹ️";
+            position: absolute;
+            left: 0;
+        }
+
+        .recommendation {
+            background: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 15px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .threats-section {
+            margin-top: 20px;
+        }
+
+        .threat-item {
+            background: #fff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            border-left: 4px solid #dc3545;
+        }
+
+        .threat-item h4 {
+            color: #dc3545;
+            margin-bottom: 5px;
+        }
+
+        .threat-item p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .error {
+            background: #f8d7da;
+            border: 2px solid #dc3545;
+            color: #721c24;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .api-url {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .api-url input {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🛡️ Verificador de Links</h1>
+        <p class="subtitle">Verifique se um site é confiável e seguro antes de acessar</p>
+        <p class="subtitle" style="font-size: 14px; margin-top: -10px;">Detecta golpes, vírus, malware e ataques hackers</p>
+
+        <div class="api-url">
+            <label>URL da API (padrão: http://localhost:8000)</label>
+            <input type="text" id="apiUrl" value="http://localhost:8000" placeholder="http://localhost:8000">
+        </div>
+
+        <div class="input-group">
+            <label for="urlInput">Cole a URL do site que deseja verificar:</label>
+            <div class="input-container">
+                <input 
+                    type="text" 
+                    id="urlInput" 
+                    placeholder="https://exemplo.com ou exemplo.com"
+                    autocomplete="off"
+                >
+                <button id="verifyBtn" onclick="verifyLink()">🔍 Verificar Site</button>
+            </div>
+            <p style="font-size: 12px; color: #666; margin-top: 5px;">
+                💡 Você pode colar qualquer URL: com ou sem https://
+            </p>
+        </div>
+
+        <div id="loading" class="loading" style="display: none;">
+            <div class="spinner"></div>
+            <p>Analisando site...</p>
+            <p style="font-size: 12px; margin-top: 10px;">Verificando confiabilidade, vírus, malware e ataques...</p>
+        </div>
+
+        <div id="result"></div>
+    </div>
+
+    <script>
+        // Permitir Enter para verificar
+        document.getElementById('urlInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                verifyLink();
+            }
+        });
+
+        async function verifyLink() {
+            const urlInput = document.getElementById('urlInput');
+            const verifyBtn = document.getElementById('verifyBtn');
+            const loading = document.getElementById('loading');
+            const result = document.getElementById('result');
+            const apiUrl = document.getElementById('apiUrl').value || 'http://localhost:8000';
+
+            const url = urlInput.value.trim();
+
+            if (!url) {
+                alert('Por favor, insira um link para verificar');
+                return;
+            }
+
+            // Limpar resultado anterior
+            result.innerHTML = '';
+            loading.style.display = 'block';
+            verifyBtn.disabled = true;
+
+            try {
+                // Primeiro, verificar confiabilidade básica
+                let verifyUrl = `${apiUrl}/verify/${encodeURIComponent(url)}`;
+                
+                // Se a URL não começa com http/https, adicionar
+                if (!url.startsWith('http://') && !url.startsWith('https://')) {
+                    verifyUrl = `${apiUrl}/verify/${encodeURIComponent('https://' + url)}`;
+                }
+                
+                const verifyResponse = await fetch(verifyUrl);
+                
+                if (!verifyResponse.ok) {
+                    const errorText = await verifyResponse.text();
+                    throw new Error(`Erro ao verificar link: ${errorText}`);
+                }
+
+                const trustData = await verifyResponse.json();
+
+                // Se o link parece confiável, fazer análise completa
+                let analysisData = null;
+                if (trustData.is_trusted || trustData.trust_score >= 40) {
+                    try {
+                        const submitResponse = await fetch(`${apiUrl}/submit`, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ url: url, user_id: null })
+                        });
+
+                        if (submitResponse.ok) {
+                            const submitData = await submitResponse.json();
+                            
+                            // Aguardar resultado da análise
+                            let attempts = 0;
+                            const maxAttempts = 30;
+                            
+                            while (attempts < maxAttempts) {
+                                await new Promise(resolve => setTimeout(resolve, 2000));
+                                
+                                const statusResponse = await fetch(`${apiUrl}/submission/${submitData.job_id}`);
+                                if (statusResponse.ok) {
+                                    const statusData = await statusResponse.json();
+                                    
+                                    if (statusData.status === 'done') {
+                                        analysisData = statusData.result;
+                                        break;
+                                    } else if (statusData.status === 'failed') {
+                                        break;
+                                    }
+                                }
+                                
+                                attempts++;
+                            }
+                        }
+                    } catch (e) {
+                        console.log('Análise completa não disponível:', e);
+                    }
+                }
+
+                displayResult(trustData, analysisData, apiUrl);
+
+            } catch (error) {
+                result.innerHTML = `
+                    <div class="error">
+                        <h3>❌ Erro ao verificar link</h3>
+                        <p><strong>Erro:</strong> ${error.message}</p>
+                        <p style="margin-top: 10px; font-size: 12px;">
+                            <strong>Possíveis causas:</strong><br>
+                            • A API não está rodando em ${apiUrl}<br>
+                            • Docker Desktop não está rodando<br>
+                            • Verifique se executou: docker-compose up -d
+                        </p>
+                        <p style="margin-top: 10px; font-size: 12px;">
+                            <strong>Como resolver:</strong><br>
+                            1. Abra o Docker Desktop<br>
+                            2. Execute: docker-compose up -d<br>
+                            3. Aguarde alguns segundos<br>
+                            4. Tente novamente
+                        </p>
+                    </div>
+                `;
+            } finally {
+                loading.style.display = 'none';
+                verifyBtn.disabled = false;
+            }
+        }
+
+        function displayResult(trustData, analysisData, apiUrl) {
+            const result = document.getElementById('result');
+            
+            let resultClass = 'suspicious';
+            if (trustData.trust_score >= 80) {
+                resultClass = 'trusted';
+            } else if (trustData.trust_score >= 60) {
+                resultClass = 'moderate';
+            }
+
+            let html = `
+                <div class="result ${resultClass}">
+                    <div class="result-header">
+                        <span class="trust-icon">${trustData.trust_icon || '❓'}</span>
+                        <div>
+                            <div class="trust-score">${trustData.trust_score || 0}/100</div>
+                            <div class="trust-level">${trustData.trust_level || 'Desconhecido'}</div>
+                        </div>
+                    </div>
+
+                    <div class="recommendation">
+                        ${trustData.recommendation || 'Não foi possível determinar a confiabilidade.'}
+                    </div>
+            `;
+
+            // Mostrar problemas
+            if (trustData.issues && trustData.issues.length > 0) {
+                html += `
+                    <div class="result-section">
+                        <h3>⚠️ Problemas Encontrados</h3>
+                        <ul class="issues-list">
+                            ${trustData.issues.map(issue => `<li>${issue}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+
+            // Mostrar informações positivas
+            if (trustData.info && trustData.info.length > 0) {
+                html += `
+                    <div class="result-section">
+                        <h3>ℹ️ Informações</h3>
+                        <ul class="info-list">
+                            ${trustData.info.map(info => `<li>${info}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+
+            // Mostrar análise completa se disponível
+            if (analysisData) {
+                html += `
+                    <div class="result-section threats-section">
+                        <h3>🔍 Análise Completa de Segurança</h3>
+                        <div style="display: flex; gap: 20px; margin-top: 15px; flex-wrap: wrap;">
+                            <div>
+                                <strong>Nível de Risco:</strong> 
+                                <span style="color: ${analysisData.level === 'alto' ? '#dc3545' : analysisData.level === 'médio' ? '#ffc107' : '#28a745'}; font-weight: bold; font-size: 18px;">${(analysisData.level || 'N/A').toUpperCase()}</span>
+                            </div>
+                            <div>
+                                <strong>Score de Ameaça:</strong> 
+                                <span style="font-weight: bold; font-size: 18px;">${analysisData.score || 0}/100</span>
+                            </div>
+                        </div>
+                `;
+
+                if (analysisData.checks && analysisData.checks.length > 0) {
+                    html += '<h4 style="margin-top: 15px;">Ameaças Detectadas:</h4>';
+                    analysisData.checks.forEach(check => {
+                        if (!check.ok) {
+                            html += `
+                                <div class="threat-item">
+                                    <h4>${check.name}</h4>
+                                    <p>${check.reason || 'Ameaça detectada'}</p>
+                                </div>
+                            `;
+                        }
+                    });
+                }
+
+                if (analysisData.tips && analysisData.tips.length > 0) {
+                    html += '<h4 style="margin-top: 15px;">💡 Dicas de Segurança:</h4><ul class="info-list">';
+                    analysisData.tips.forEach(tip => {
+                        html += `<li>${tip}</li>`;
+                    });
+                    html += '</ul>';
+                }
+
+                html += '</div>';
+            } else {
+                // Mostrar informações sobre análise completa
+                html += `
+                    <div class="result-section">
+                        <h3>🔍 Análise Completa</h3>
+                        <p style="color: #666; font-size: 14px;">
+                            ${trustData.is_trusted 
+                                ? '💡 Para análise completa de vírus e malware, o link será analisado em segundo plano. Verifique novamente em alguns instantes.'
+                                : '⚠️ Análise completa não foi realizada devido ao baixo score de confiabilidade. Este site pode ser perigoso.'}
+                        </p>
+                    </div>
+                `;
+            }
+            
+            // Adicionar link para ver detalhes completos
+            html += `
+                <div class="result-section" style="text-align: center; margin-top: 20px;">
+                    <p style="font-size: 12px; color: #666;">
+                        URL verificada: <strong>${trustData.url || url}</strong><br>
+                        Domínio: <strong>${trustData.domain || 'N/A'}</strong>
+                    </p>
+                </div>
+            `;
+
+            html += '</div>';
+            result.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
+

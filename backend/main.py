@@ -1,18 +1,27 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import redis
 import os
+import tempfile
+import shutil
 from pydantic import BaseModel, HttpUrl
 from rq import Queue
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Optional, List
 import logging
 from contextlib import contextmanager
+from urllib.parse import urlparse
 
 from db_pool import get_db_conn, return_db_conn
 from url_validator import validate_url
 from metrics import track_request, get_metrics
 from time import time
+from quarantine import analyze_url_for_attacks, should_quarantine
+from quarantine_api import add_to_quarantine, check_blacklist, add_to_blacklist
+from defense import extract_attack_metadata, analyze_attack_pattern, should_block_ip, create_attack_report
+from link_trust import verify_link_trust, calculate_trust_score
+import json
 
 # Configurar logging
 logging.basicConfig(
@@ -70,6 +79,49 @@ def init_db():
                 )
             """)
             
+            # Criar tabela de quarentena
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS quarantine (
+                    id SERIAL PRIMARY KEY,
+                    item_type TEXT NOT NULL,
+                    item_identifier TEXT NOT NULL,
+                    threat_analysis JSONB NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    quarantined_at TIMESTAMP DEFAULT now(),
+                    released_at TIMESTAMP,
+                    released_by INTEGER,
+                    status TEXT DEFAULT 'quarantined',
+                    notes TEXT
+                )
+            """)
+            
+            # Criar tabela de blacklist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    id SERIAL PRIMARY KEY,
+                    item_type TEXT NOT NULL,
+                    item_value TEXT NOT NULL UNIQUE,
+                    threat_type TEXT,
+                    added_at TIMESTAMP DEFAULT now(),
+                    added_by INTEGER,
+                    is_active BOOLEAN DEFAULT true,
+                    notes TEXT
+                )
+            """)
+            
+            # Criar tabela de logs de ataques
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS attack_logs (
+                    id SERIAL PRIMARY KEY,
+                    client_ip TEXT NOT NULL,
+                    attack_type TEXT NOT NULL,
+                    risk_level TEXT NOT NULL,
+                    metadata JSONB NOT NULL,
+                    report JSONB,
+                    created_at TIMESTAMP DEFAULT now()
+                )
+            """)
+            
             # Criar índices
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_submissions_job_id ON submissions(job_id)
@@ -79,6 +131,24 @@ def init_db():
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_submissions_created_at ON submissions(created_at)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_quarantine_status ON quarantine(status)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_quarantine_item ON quarantine(item_type, item_identifier)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_blacklist_value ON blacklist(item_value)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_blacklist_active ON blacklist(is_active)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_attack_logs_ip ON attack_logs(client_ip)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_attack_logs_created ON attack_logs(created_at)
             """)
             
             conn.commit()
@@ -94,18 +164,173 @@ class SubmitURL(BaseModel):
     url: HttpUrl
     user_id: int | None = None
 
+class BlacklistItem(BaseModel):
+    item_type: str  # 'url', 'domain', 'ip', 'hash'
+    item_value: str
+    threat_type: Optional[str] = None
+    notes: Optional[str] = None
+
 @app.get("/")
 def index():
     return {"status": "online", "mensagem": "Sistema de proteção educacional ativo."}
 
+def _verify_link_internal(url: str) -> dict:
+    """
+    Função auxiliar para verificar link (evita duplicação de código)
+    """
+    # Adicionar protocolo se não tiver
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    # Verificar confiabilidade
+    trust_result = verify_link_trust(url)
+    
+    # Verificar se está na blacklist
+    parsed = urlparse(url)
+    domain = parsed.netloc
+    
+    is_blacklisted = check_blacklist('url', url) or check_blacklist('domain', domain)
+    
+    if is_blacklisted:
+        trust_result['is_trusted'] = False
+        trust_result['trust_score'] = 0
+        trust_result['trust_level'] = 'não confiável'
+        trust_result['trust_icon'] = '❌'
+        if 'issues' not in trust_result:
+            trust_result['issues'] = []
+        trust_result['issues'].append("URL ou domínio está na blacklist")
+        trust_result['recommendation'] = "Este link foi bloqueado por segurança. NÃO acesse."
+    
+    return trust_result
+
+@app.get("/verify/{url:path}")
+def verify_link(url: str):
+    """
+    Verifica se um link é confiável ou não
+    Exemplo: GET /verify/https://example.com
+    """
+    try:
+        return _verify_link_internal(url)
+    except Exception as e:
+        logger.error("Erro ao verificar link: %s", e)
+        raise HTTPException(status_code=400, detail=f"Erro ao verificar link: {str(e)}")
+
+@app.post("/verify")
+def verify_link_post(payload: SubmitURL):
+    """
+    Verifica se um link é confiável ou não (POST)
+    """
+    try:
+        return _verify_link_internal(str(payload.url))
+    except Exception as e:
+        logger.error("Erro ao verificar link: %s", e)
+        raise HTTPException(status_code=400, detail=f"Erro ao verificar link: {str(e)}")
+
 @app.post("/submit")
 def submit(payload: SubmitURL, request: Request):
     """Envia URL para análise"""
+    url_str = str(payload.url)
+    
+    # Obter IP do cliente
+    client_ip = request.client.host if request.client else "unknown"
+    if request.headers.get("x-forwarded-for"):
+        client_ip = request.headers.get("x-forwarded-for").split(",")[0].strip()
+    
+    # Verificar blacklist primeiro
+    if check_blacklist('url', url_str):
+        logger.warning("URL na blacklist: %s", url_str)
+        raise HTTPException(status_code=403, detail="URL está na blacklist e foi bloqueada")
+    
+    # Verificar se IP está bloqueado
+    if check_blacklist('ip', client_ip):
+        logger.warning("IP bloqueado tentou acessar: %s", client_ip)
+        raise HTTPException(status_code=403, detail="Seu IP foi bloqueado por atividades suspeitas")
+    
+    # Extrair domínio para verificar blacklist
+    parsed = urlparse(url_str)
+    domain = parsed.netloc
+    if domain and check_blacklist('domain', domain):
+        logger.warning("Domínio na blacklist: %s", domain)
+        raise HTTPException(status_code=403, detail="Domínio está na blacklist e foi bloqueado")
+    
     # Validar URL
     is_valid, error_msg = validate_url(payload.url)
     if not is_valid:
         logger.warning("URL bloqueada: %s - %s", payload.url, error_msg)
         raise HTTPException(status_code=400, detail=f"URL inválida ou bloqueada: {error_msg}")
+    
+    # Análise rápida de ataques na URL
+    attack_analysis = analyze_url_for_attacks(url_str)
+    if attack_analysis.get('is_malicious', False):
+        # Extrair metadados do ataque
+        attack_metadata = extract_attack_metadata(dict(request.headers), client_ip)
+        attack_metadata.update({
+            'threat_type': 'url_attack',
+            'risk_level': attack_analysis.get('risk_level', 'high'),
+            'target_url': url_str,
+            'threat_analysis': attack_analysis,
+            'payload': url_str
+        })
+        
+        # Criar relatório forense
+        attack_report = create_attack_report(attack_metadata)
+        
+        # Registrar ataque no banco
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO attack_logs (client_ip, attack_type, risk_level, metadata, report, created_at)
+                    VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s)
+                """, (
+                    client_ip,
+                    attack_analysis.get('threats', [{}])[0].get('type', 'unknown') if attack_analysis.get('threats') else 'unknown',
+                    attack_analysis.get('risk_level', 'high'),
+                    json.dumps(attack_metadata),
+                    json.dumps(attack_report),
+                    datetime.now()
+                ))
+                conn.commit()
+                cur.close()
+        except Exception as e:
+            logger.error("Erro ao registrar ataque: %s", e)
+        
+        # Verificar se deve bloquear IP
+        try:
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT metadata FROM attack_logs 
+                    WHERE client_ip = %s 
+                    AND created_at > %s
+                """, (client_ip, datetime.now() - timedelta(hours=24)))
+                recent_attacks = [json.loads(row[0]) for row in cur.fetchall()]
+                cur.close()
+                
+                should_block, reason = should_block_ip(client_ip, recent_attacks)
+                if should_block:
+                    # Bloquear IP automaticamente
+                    add_to_blacklist('ip', client_ip, threat_type='repeated_attacks',
+                                   notes=f"Bloqueado automaticamente: {reason}")
+                    logger.warning("IP bloqueado automaticamente: %s - %s", client_ip, reason)
+        except Exception as e:
+            logger.error("Erro ao verificar bloqueio de IP: %s", e)
+        
+        # Adicionar à blacklist automaticamente
+        add_to_blacklist('url', url_str, threat_type='attack_detected', 
+                        notes=f"Ataque detectado: {attack_analysis.get('risk_level')}")
+        
+        # Adicionar à quarentena
+        if should_quarantine(attack_analysis):
+            add_to_quarantine('url', url_str, attack_analysis, 
+                            attack_analysis.get('risk_level', 'high'),
+                            notes="Ataque detectado na URL")
+        
+        logger.warning("Ataque detectado na URL: %s - %s - IP: %s", url_str, attack_analysis.get('risk_level'), client_ip)
+        raise HTTPException(
+            status_code=403, 
+            detail=f"Ataque detectado: {', '.join([t.get('type', 'unknown') for t in attack_analysis.get('threats', [])[:3]])}"
+        )
     
     job_id = str(uuid.uuid4())
     
@@ -317,6 +542,126 @@ async def metrics_middleware(request: Request, call_next):
 def metrics_endpoint():
     """Endpoint de métricas para monitoramento"""
     return get_metrics()
+
+@app.post("/quarantine/file")
+async def quarantine_file(file: UploadFile = File(...)):
+    """Analisa e coloca arquivo em quarentena se necessário"""
+    # Criar arquivo temporário
+    temp_file = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            temp_file = tmp.name
+        
+        # Analisar arquivo
+        from quarantine import analyze_file_content
+        analysis = analyze_file_content(temp_file)
+        
+        # Se for malicioso, adicionar à quarentena
+        if should_quarantine(analysis):
+            quarantine_id = add_to_quarantine(
+                'file',
+                analysis.get('file_hash', ''),
+                analysis,
+                analysis.get('risk_level', 'high'),
+                notes=f"Arquivo: {file.filename}"
+            )
+            
+            # Adicionar hash à blacklist
+            if analysis.get('file_hash'):
+                add_to_blacklist('hash', analysis['file_hash'], 
+                               threat_type='malware',
+                               notes=f"Arquivo malicioso: {file.filename}")
+            
+            return {
+                "quarantined": True,
+                "quarantine_id": quarantine_id,
+                "analysis": analysis,
+                "message": "Arquivo colocado em quarentena"
+            }
+        else:
+            return {
+                "quarantined": False,
+                "analysis": analysis,
+                "message": "Arquivo seguro"
+            }
+    finally:
+        # Limpar arquivo temporário
+        if temp_file and os.path.exists(temp_file):
+            os.unlink(temp_file)
+
+@app.get("/quarantine")
+def list_quarantine(status: Optional[str] = None, limit: int = 100):
+    """Lista itens em quarentena"""
+    from quarantine_api import get_quarantine_items
+    items = get_quarantine_items(status, limit)
+    return {"items": items, "total": len(items)}
+
+@app.post("/quarantine/{quarantine_id}/release")
+def release_from_quarantine(quarantine_id: int, user_id: Optional[int] = None):
+    """Libera item da quarentena"""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                UPDATE quarantine 
+                SET status = 'released', released_at = %s, released_by = %s
+                WHERE id = %s
+            """, (datetime.now(), user_id, quarantine_id))
+            conn.commit()
+            cur.close()
+            return {"message": "Item liberado da quarentena", "quarantine_id": quarantine_id}
+    except Exception as e:
+        logger.error("Erro ao liberar da quarentena: %s", e)
+        raise HTTPException(status_code=500, detail=f"Erro ao liberar: {str(e)}")
+
+@app.post("/blacklist")
+def add_blacklist_item(item: BlacklistItem, user_id: Optional[int] = None):
+    """Adiciona item à blacklist"""
+    try:
+        blacklist_id = add_to_blacklist(
+            item.item_type,
+            item.item_value,
+            item.threat_type,
+            item.notes,
+            user_id
+        )
+        return {"message": "Item adicionado à blacklist", "blacklist_id": blacklist_id}
+    except Exception as e:
+        logger.error("Erro ao adicionar à blacklist: %s", e)
+        raise HTTPException(status_code=500, detail=f"Erro ao adicionar: {str(e)}")
+
+@app.get("/blacklist")
+def list_blacklist(limit: int = 100):
+    """Lista itens da blacklist"""
+    try:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, item_type, item_value, threat_type, added_at, is_active, notes
+                FROM blacklist
+                WHERE is_active = true
+                ORDER BY added_at DESC
+                LIMIT %s
+            """, (limit,))
+            rows = cur.fetchall()
+            cur.close()
+            
+            items = []
+            for row in rows:
+                items.append({
+                    'id': row[0],
+                    'item_type': row[1],
+                    'item_value': row[2],
+                    'threat_type': row[3],
+                    'added_at': row[4].isoformat() if row[4] else None,
+                    'is_active': row[5],
+                    'notes': row[6]
+                })
+            return {"items": items, "total": len(items)}
+    except Exception as e:
+        logger.error("Erro ao listar blacklist: %s", e)
+        raise HTTPException(status_code=500, detail=f"Erro ao listar: {str(e)}")
 
 @app.get("/health")
 def health():

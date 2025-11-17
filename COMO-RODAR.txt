@@ -1,0 +1,31 @@
+========================================
+  COMO RODAR O PROJETO - GUIA RÁPIDO
+========================================
+
+⚠️ IMPORTANTE: Docker Desktop precisa estar RODANDO!
+
+1. INICIAR DOCKER DESKTOP
+   - Abra o Docker Desktop
+   - Aguarde até aparecer "Docker is running"
+
+2. EXECUTAR SCRIPT (Windows)
+   .\start-project.bat
+
+   OU manualmente:
+   
+   docker-compose up -d
+   timeout /t 10
+   docker exec -d backend rq worker
+   start verify.html
+
+3. TESTAR
+   - Abra: http://localhost:8000/health
+   - Ou abra: verify.html no navegador
+
+4. PARAR
+   docker-compose down
+
+========================================
+Para mais detalhes, veja: RODAR-PROJETO.md
+========================================
+
